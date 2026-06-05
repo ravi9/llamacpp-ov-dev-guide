@@ -103,9 +103,7 @@ Next, add the entry in `get_supported_ops()` in `ggml/src/ggml-openvino/openvino
 ```
 
 ### 3. Add the Op's Enum Value to the Support Function
-If the op is fully supported in all its configurations, add its enum value to the appropriate set inside `ggml_backend_openvino_device_supports_op` in `ggml/src/ggml-openvino/ggml-openvino.cpp`. Use `supported_ops` for standard ops (`ggml_op`), `supported_unary_ops` for unary ops (`ggml_unary_op`), or `supported_glu_ops` for GLU ops (`ggml_glu_op`).
-
-If only some configurations of the op are supported, add a case for it in `is_op_unsupported_case` that returns true for any configuration the backend doesn't support.
+If only some configurations of the op are supported, add a case for it in `is_op_unsupported_case` that returns true for any configuration the backend/device doesn't support.
 
 ### 4. Add Dynamic Dim Propagation Logic
 `GgmlOvDecoder::compute_node_dynamic_dims()` Populates a map that contains information about the dynamic shapes propagated by each node. Extend this function with a new `case` in the `switch(node->op)` block that maps the dynamic dimension from the relevant source tensor to the output node, following the same conventions as existing ops.

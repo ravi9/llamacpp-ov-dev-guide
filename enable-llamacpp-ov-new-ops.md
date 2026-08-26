@@ -11,22 +11,85 @@ custom parameter handling, variant dispatch, and device-specific gating.
 | `ggml/src/ggml-openvino/openvino/op_table.cpp` | Registers op name -> translation function |
 | `ggml/src/ggml-openvino/openvino/op_table.h` | Declares custom translation functions |
 | `ggml/src/ggml-openvino/openvino/op/<op>.cpp` | Your custom translation logic |
-| `ggml/src/ggml-openvino/ggml-openvino.cpp` | `is_op_unsupported_case()` — rejects configurations |
+| `ggml/src/ggml-openvino/ggml-openvino.cpp` | `is_op_supported_case()` — accepts/rejects configurations, with a reason |
 | `ggml/src/ggml-openvino/ggml-decoder.cpp` | `compute_op_case()`, `compute_node_dynamic_dims()` |
 
 ---
 
 ## Finding Unsupported Ops
 
-To identify which ops are not yet supported, follow the instructions in
-[docs/ops.md](https://github.com/ggml-org/llama.cpp/blob/main/docs/ops.md) and
-run the support command:
+The general workflow is: **run a real model with `GGML_OPENVINO_LOG_UNSUPPORTED_OPS=1`**,
+note which ops get logged as unsupported, then follow the rest of this guide
+(starting at [Know Your Op's Registry Key](#know-your-ops-registry-key)) to add
+support for each one.
+
+### Method 1 (typical): Run a Model with `GGML_OPENVINO_LOG_UNSUPPORTED_OPS=1`
+
+Every rejection in `is_op_supported_case()` (and the type/view checks around
+it) carries a `reason` string. Setting this env var to a truthy value logs one
+`WARN` line per rejected tensor with that reason — no need to read source or
+step through `ggml-openvino.cpp` in a debugger to find out what's missing and
+why.
+
+**Quick guide:**
+
+1. **Download a sample model** (see [Download Sample Model](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/OPENVINO.md#3-download-sample-model))
+   and run it with the flag set:
+
+   ```bash
+   GGML_OPENVINO_LOG_UNSUPPORTED_OPS=1 GGML_OPENVINO_DEVICE=CPU \
+     ./build/ReleaseOV/bin/llama-simple -m ~/models/Llama-3.2-1B-Instruct-Q4_0.gguf -n 50 "The story of AI is "
+   ```
+
+2. **Read the warning lines.** Each looks like:
+
+   ```
+   OpenVINO op unsupported: op 'node_name' (GGML_OP_POOL_2D), type f32: POOL_2D with padding and kernel size < 3 is not supported on GPU/NPU
+   ```
+
+   The fields, in order, are: tensor name, GGML op, tensor type, and the
+   `reason` string — the same fields you'd otherwise have to reconstruct
+   manually from `op_table.cpp` / `is_op_supported_case()`.
+
+3. **Expect a lot of output** — the check runs once per tensor in the compute
+   graph, so a single unsupported op can log dozens of near-identical lines
+   (one per layer). Pipe through `grep` to see the distinct op names/reasons:
+
+   ```bash
+   GGML_OPENVINO_LOG_UNSUPPORTED_OPS=1 GGML_OPENVINO_DEVICE=CPU \
+     ./build/ReleaseOV/bin/llama-simple -m ~/models/Llama-3.2-1B-Instruct-Q4_0.gguf -n 1 "hi" \
+     2>&1 | grep 'unsupported' | sort -u
+   ```
+
+4. **No output at all** means every op in that model/config ran on the
+   OpenVINO backend — try a different model/quantization, or fall back to
+   Method 2 to check a specific op you already suspect is missing.
+
+> [!NOTE]
+> On apps built on `common/log.cpp` (`llama-cli`, `llama-simple`,
+> `llama-bench`, etc.), `WARN`-level logs already print by default
+> (default verbosity is `3`/INFO, which includes `WARN` at `2`). They are
+> only hidden if you've explicitly lowered verbosity with `--log-verbosity`/
+> `-lv` to `1` (errors only) or `0` — in that case, raise it back to `2` or
+> higher to see these messages. `test-backend-ops` doesn't use `common/log.cpp`
+> at all, so its `WARN` output isn't gated by verbosity in the first place.
+
+### Method 2: Check a Specific Op with `test-backend-ops`
+
+If you already know (or suspect) which op is missing — e.g. from an upstream
+model's op list, or from Method 1 above — confirm it directly with the
+support matrix, optionally combined with the same env var for the exact
+rejection reason:
 
 ```bash
 ./build/bin/test-backend-ops support -b OPENVINO
+
+# with rejection reasons for a specific op:
+GGML_OPENVINO_LOG_UNSUPPORTED_OPS=1 ./build/bin/test-backend-ops support -b OPENVINO -o POOL_2D
 ```
 
-This prints a matrix of every op and the configurations the backend supports.
+This also follows [docs/ops.md](https://github.com/ggml-org/llama.cpp/blob/main/docs/ops.md)'s
+general approach for finding unsupported ops across any backend.
 
 ### Know Your Op's Registry Key
 
@@ -61,9 +124,11 @@ Once you know the correct key, search for it in `op_table.cpp`:
 3. **The key is present, but the support matrix shows partial/no support.**
    The translation exists but certain configurations (data types, layouts,
    devices, or op modes) are rejected or mistranslated. Three places decide this:
-   - `is_op_unsupported_case()` in `ggml-openvino.cpp` — returns `true` to
-     *reject* a configuration. If your case is refused outright, the gate is
-     probably here.
+   - `is_op_supported_case()` in `ggml-openvino.cpp` — returns a struct with
+     `is_supported` (bool) and a `reason` string explaining a rejection. If
+     your case is refused outright, the gate is probably here. Run with
+     `GGML_OPENVINO_LOG_UNSUPPORTED_OPS=1` (see above) to see the exact
+     `reason` string at runtime instead of reading the source.
    - `GgmlOvDecoder::compute_op_case()` in `ggml-decoder.cpp` — classifies op
      variants. An `op_case` of `0` means "unrecognised variant".
    - The translation function itself in `openvino/op/<op>.cpp` — may only
@@ -369,10 +434,12 @@ Then add the entry in `get_supported_ops()` in `op_table.cpp`:
 
 ### Gating Unsupported Configurations
 
-If only some configurations work, add a case in `is_op_unsupported_case()` in
-`ggml-openvino.cpp` returning `true` for anything the backend can't handle.
-Limitations are often **device-specific** — gate narrowly rather than
-disabling the op everywhere:
+If only some configurations work, add a case in `is_op_supported_case()` in
+`ggml-openvino.cpp` returning a rejection with a **human-readable reason** for
+anything the backend can't handle — the reason string is what shows up when a
+contributor debugs with `GGML_OPENVINO_LOG_UNSUPPORTED_OPS=1` (see
+[Finding Unsupported Ops](#finding-unsupported-ops)). Limitations are often
+**device-specific** — gate narrowly rather than disabling the op everywhere:
 
 ```cpp
 case GGML_OP_POOL_2D: {
@@ -382,7 +449,7 @@ case GGML_OP_POOL_2D: {
         const int k0 = params[1], k1 = params[2];
         const int p0 = params[5], p1 = params[6];
         if ((p0 > 0 || p1 > 0) && (k0 < 3 || k1 < 3)) {
-            return true;   // true == unsupported
+            return {false, "POOL_2D with padding and kernel size < 3 is not supported on GPU/NPU"};
         }
     }
     break;
@@ -406,16 +473,24 @@ position in the output — the same reversal caveat applies.
 
 ## Next Steps: Verification, Testing, and CI
 
+Whether you added a Beginner 1-to-1 mapping or an Intermediate custom translation, test it rigorously against the reference CPU backend before opening a PR.
+
 ### 1. Rebuild the Project
 
+Use the same build layout as the rest of this guide so paths match:
+
 ```bash
-cmake -B build -DGGML_OPENVINO=ON
-cmake --build build --config Release -j
+# Linux
+source /opt/intel/openvino/setupvars.sh
+cmake -B build/ReleaseOV -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_OPENVINO=ON
+cmake --build build/ReleaseOV --parallel
 ```
+
+See [contributing-llamacpp-ov.md](./contributing-llamacpp-ov.md#step-3--build-with-the-openvino-backend) for Windows and full build instructions.
 
 ### 2. Verify Backend Ops (Unit Testing)
 
-`test-backend-ops` compares OpenVINO results against the CPU reference.
+`test-backend-ops` compares OpenVINO results against the CPU reference implementation and reports numerical divergence.
 
 **The `-o` filter takes the short name, not the registry key:**
 
@@ -426,7 +501,75 @@ cmake --build build --config Release -j
 | `GGML_GLU_OP_GEGLU_QUICK` | `-o GEGLU_QUICK` |
 
 ```bash
-./build/bin/test-backend-ops -b OPENVINO -o POOL_2D
+./build/ReleaseOV/bin/test-backend-ops -b OPENVINO -o POOL_2D
 ```
 
-**Test every device you have access to** — a device-specific limitation will
+Ensure all tests pass without numerical divergence or runtime crashes.
+
+**Test every device you have access to** — a device-specific limitation will not show up on CPU:
+
+```bash
+GGML_OPENVINO_DEVICE=CPU ./build/ReleaseOV/bin/test-backend-ops -b OPENVINO -o POOL_2D
+GGML_OPENVINO_DEVICE=GPU ./build/ReleaseOV/bin/test-backend-ops -b OPENVINO -o POOL_2D
+
+# NPU — keep the context small to avoid unrelated failures
+GGML_OPENVINO_DEVICE=NPU ./build/ReleaseOV/bin/test-backend-ops -b OPENVINO -o POOL_2D
+```
+
+If a configuration fails only on GPU or NPU, gate it in `is_op_supported_case()` rather than disabling the op everywhere — see "Gating Unsupported Configurations" above.
+
+### 3. Check the Support Table
+
+Re-run the support command to confirm your op is registered:
+
+```bash
+./build/ReleaseOV/bin/test-backend-ops support -b OPENVINO
+```
+
+Look for your operator in the output and verify the configuration matrix reflects the support you expect.
+
+### 4. End-to-End Model Verification (Recommended)
+
+Download a sample model first (see [Download Sample Model](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/OPENVINO.md#3-download-sample-model)), then run inference and confirm the OpenVINO backend is actually selected — `-ngl 99` alone does not choose it:
+
+```bash
+GGML_OPENVINO_DEVICE=CPU ./build/ReleaseOV/bin/llama-simple \
+    -m ~/models/Llama-3.2-1B-Instruct-Q4_0.gguf -n 50 "The story of AI is "
+```
+
+Check startup logs for the OpenVINO device line. If it's absent, your op never ran.
+
+Also run a performance regression check (`-fa 1` is required):
+
+```bash
+./build/ReleaseOV/bin/llama-bench -m ~/models/Llama-3.2-1B-Instruct-Q4_0.gguf -fa 1
+```
+
+See [Step 5 of the contributing guide](./contributing-llamacpp-ov.md#step-5--test-your-changes) for the full GPU/NPU test matrix.
+
+### 5. Pre-PR Checklist
+
+- [ ] `#include <openvino/op/<op>.hpp>` added to `op_table.cpp`
+- [ ] Entry in `get_supported_ops()` uses the **correct prefix** (`GGML_OP_` / `GGML_UNARY_OP_` / `GGML_GLU_OP_`)
+- [ ] Custom translations declared via `GGML_OP_CONVERTER` in `op_table.h`
+- [ ] `compute_op_case()` case added if the op has variants
+- [ ] `is_op_supported_case()` case added for unsupported configs, with a clear rejection `reason`
+- [ ] `compute_node_dynamic_dims()` case added if the op reshapes/permutes
+- [ ] Views handled with `process_view_input_new()` where applicable
+- [ ] Constants created with the input's element type
+- [ ] Dimension order reversed and verified on a **non-square** shape
+- [ ] Tests pass on CPU **and** GPU/NPU
+- [ ] `test-backend-ops support -b OPENVINO` shows the op
+- [ ] `llama-bench -fa 1` shows no performance regression
+- [ ] No unrelated changes included
+
+### 6. Open a Pull Request
+
+**Full workflow: [contributing-llamacpp-ov.md](./contributing-llamacpp-ov.md).** Op-specific points to remember:
+
+- **Base branch is `ravi9/llama.cpp` / `dev_backend_openvino`**, not `ggml-org/llama.cpp` master. GitHub often defaults to the wrong one — change it before submitting. Work is upstreamed after team validation.
+- Use the `ggml-openvino:` commit prefix, e.g. `ggml-openvino: add support for GGML_OP_POOL_2D`.
+- In the PR description, state **which devices you tested on** and which configurations you deliberately gated off in `is_op_supported_case()`.
+- Fill in the **AI usage disclosure** field in the PR template.
+- Monitor GitHub Actions, especially the OpenVINO CI jobs. Failures there often mean your mapping breaks on a different OS or hardware combination.
+- Address maintainer and CI feedback with additional commits on your branch.

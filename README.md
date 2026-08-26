@@ -78,7 +78,7 @@ The backend:
 ### 🔧 [Enable New GGML Ops for OpenVINO Backend](./enable-llamacpp-ov-new-ops.md)
 
 Step-by-step guide for adding support for new GGML operations in the OpenVINO backend. Covers:
-- Identifying unsupported ops in the GGML compute graph
+- Identifying unsupported ops by running a model with `GGML_OPENVINO_LOG_UNSUPPORTED_OPS` set, which logs the rejection reason for each unsupported op
 - Implementing the op translation layer using OpenVINO's frontend API
 - Testing and validation
 

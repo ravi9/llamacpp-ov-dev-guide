@@ -406,16 +406,24 @@ position in the output — the same reversal caveat applies.
 
 ## Next Steps: Verification, Testing, and CI
 
+Whether you added a Beginner 1-to-1 mapping or an Intermediate custom translation, test it rigorously against the reference CPU backend before opening a PR.
+
 ### 1. Rebuild the Project
 
+Use the same build layout as the rest of this guide so paths match:
+
 ```bash
-cmake -B build -DGGML_OPENVINO=ON
-cmake --build build --config Release -j
+# Linux
+source /opt/intel/openvino/setupvars.sh
+cmake -B build/ReleaseOV -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_OPENVINO=ON
+cmake --build build/ReleaseOV --parallel
 ```
+
+See [contributing-llamacpp-ov.md](./contributing-llamacpp-ov.md#step-3--build-with-the-openvino-backend) for Windows and full build instructions.
 
 ### 2. Verify Backend Ops (Unit Testing)
 
-`test-backend-ops` compares OpenVINO results against the CPU reference.
+`test-backend-ops` compares OpenVINO results against the CPU reference implementation and reports numerical divergence.
 
 **The `-o` filter takes the short name, not the registry key:**
 
@@ -426,7 +434,75 @@ cmake --build build --config Release -j
 | `GGML_GLU_OP_GEGLU_QUICK` | `-o GEGLU_QUICK` |
 
 ```bash
-./build/bin/test-backend-ops -b OPENVINO -o POOL_2D
+./build/ReleaseOV/bin/test-backend-ops -b OPENVINO -o POOL_2D
 ```
 
-**Test every device you have access to** — a device-specific limitation will
+Ensure all tests pass without numerical divergence or runtime crashes.
+
+**Test every device you have access to** — a device-specific limitation will not show up on CPU:
+
+```bash
+GGML_OPENVINO_DEVICE=CPU ./build/ReleaseOV/bin/test-backend-ops -b OPENVINO -o POOL_2D
+GGML_OPENVINO_DEVICE=GPU ./build/ReleaseOV/bin/test-backend-ops -b OPENVINO -o POOL_2D
+
+# NPU — keep the context small to avoid unrelated failures
+GGML_OPENVINO_DEVICE=NPU ./build/ReleaseOV/bin/test-backend-ops -b OPENVINO -o POOL_2D
+```
+
+If a configuration fails only on GPU or NPU, gate it in `is_op_unsupported_case()` rather than disabling the op everywhere — see "Gating Unsupported Configurations" above.
+
+### 3. Check the Support Table
+
+Re-run the support command to confirm your op is registered:
+
+```bash
+./build/ReleaseOV/bin/test-backend-ops support -b OPENVINO
+```
+
+Look for your operator in the output and verify the configuration matrix reflects the support you expect.
+
+### 4. End-to-End Model Verification (Recommended)
+
+Download a sample model first (see [Download Sample Model](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/OPENVINO.md#3-download-sample-model)), then run inference and confirm the OpenVINO backend is actually selected — `-ngl 99` alone does not choose it:
+
+```bash
+GGML_OPENVINO_DEVICE=CPU ./build/ReleaseOV/bin/llama-simple \
+    -m ~/models/Llama-3.2-1B-Instruct-Q4_0.gguf -n 50 "The story of AI is "
+```
+
+Check startup logs for the OpenVINO device line. If it's absent, your op never ran.
+
+Also run a performance regression check (`-fa 1` is required):
+
+```bash
+./build/ReleaseOV/bin/llama-bench -m ~/models/Llama-3.2-1B-Instruct-Q4_0.gguf -fa 1
+```
+
+See [Step 5 of the contributing guide](./contributing-llamacpp-ov.md#step-5--test-your-changes) for the full GPU/NPU test matrix.
+
+### 5. Pre-PR Checklist
+
+- [ ] `#include <openvino/op/<op>.hpp>` added to `op_table.cpp`
+- [ ] Entry in `get_supported_ops()` uses the **correct prefix** (`GGML_OP_` / `GGML_UNARY_OP_` / `GGML_GLU_OP_`)
+- [ ] Custom translations declared via `GGML_OP_CONVERTER` in `op_table.h`
+- [ ] `compute_op_case()` case added if the op has variants
+- [ ] `is_op_unsupported_case()` case added for unsupported configs
+- [ ] `compute_node_dynamic_dims()` case added if the op reshapes/permutes
+- [ ] Views handled with `process_view_input_new()` where applicable
+- [ ] Constants created with the input's element type
+- [ ] Dimension order reversed and verified on a **non-square** shape
+- [ ] Tests pass on CPU **and** GPU/NPU
+- [ ] `test-backend-ops support -b OPENVINO` shows the op
+- [ ] `llama-bench -fa 1` shows no performance regression
+- [ ] No unrelated changes included
+
+### 6. Open a Pull Request
+
+**Full workflow: [contributing-llamacpp-ov.md](./contributing-llamacpp-ov.md).** Op-specific points to remember:
+
+- **Base branch is `ravi9/llama.cpp` / `dev_backend_openvino`**, not `ggml-org/llama.cpp` master. GitHub often defaults to the wrong one — change it before submitting. Work is upstreamed after team validation.
+- Use the `ggml-openvino:` commit prefix, e.g. `ggml-openvino: add support for GGML_OP_POOL_2D`.
+- In the PR description, state **which devices you tested on** and which configurations you deliberately gated off in `is_op_unsupported_case()`.
+- Fill in the **AI usage disclosure** field in the PR template.
+- Monitor GitHub Actions, especially the OpenVINO CI jobs. Failures there often mean your mapping breaks on a different OS or hardware combination.
+- Address maintainer and CI feedback with additional commits on your branch.

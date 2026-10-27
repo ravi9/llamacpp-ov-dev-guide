@@ -38,7 +38,7 @@ why.
 
    ```bash
    GGML_OPENVINO_LOG_UNSUPPORTED_OPS=1 GGML_OPENVINO_DEVICE=CPU \
-     ./build/ReleaseOV/bin/llama-simple -m ~/models/Llama-3.2-1B-Instruct-Q4_0.gguf -n 50 "The story of AI is "
+     ./build/ReleaseOV/bin/llama-simple -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -n 50 "The story of AI is "
    ```
 
 2. **Read the warning lines.** Each looks like:
@@ -57,7 +57,7 @@ why.
 
    ```bash
    GGML_OPENVINO_LOG_UNSUPPORTED_OPS=1 GGML_OPENVINO_DEVICE=CPU \
-     ./build/ReleaseOV/bin/llama-simple -m ~/models/Llama-3.2-1B-Instruct-Q4_0.gguf -n 1 "hi" \
+     ./build/ReleaseOV/bin/llama-simple -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -n 1 "hi" \
      2>&1 | grep 'unsupported' | sort -u
    ```
 
@@ -534,7 +534,7 @@ Download a sample model first (see [Download Sample Model](https://github.com/gg
 
 ```bash
 GGML_OPENVINO_DEVICE=CPU ./build/ReleaseOV/bin/llama-simple \
-    -m ~/models/Llama-3.2-1B-Instruct-Q4_0.gguf -n 50 "The story of AI is "
+    -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -n 50 "The story of AI is "
 ```
 
 Check startup logs for the OpenVINO device line. If it's absent, your op never ran.
@@ -542,7 +542,7 @@ Check startup logs for the OpenVINO device line. If it's absent, your op never r
 Also run a performance regression check (`-fa 1` is required):
 
 ```bash
-./build/ReleaseOV/bin/llama-bench -m ~/models/Llama-3.2-1B-Instruct-Q4_0.gguf -fa 1
+./build/ReleaseOV/bin/llama-bench -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -fa 1
 ```
 
 See [Step 5 of the contributing guide](./contributing-llamacpp-ov.md#step-5--test-your-changes) for the full GPU/NPU test matrix.
